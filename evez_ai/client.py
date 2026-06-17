@@ -1,69 +1,86 @@
-"""EVEZ AI Client — OpenAI-compatible free AI API."""
+"""EVEZ AI — Free AI API client. 49 models. $0/month. Zero dependencies."""
+
 import json
 import urllib.request
 import urllib.error
 
 BASE_URL = "https://evez-provider-production.up.railway.app/v1"
-
+FALLBACK_URL = "http://66.42.125.106:9100/v1"
 
 class EVEZClient:
-    """Free AI API client — 35 models, $0/month."""
-
-    def __init__(self, api_key: str, base_url: str = BASE_URL):
+    """EVEZ AI client. Drop-in replacement for OpenAI client.
+    
+    Usage:
+        client = EVEZClient()
+        print(client.chat("Hello!"))
+        print(client.chat("Write code", model="deepseek-v3"))
+    """
+    
+    def __init__(self, api_key="", base_url=None):
         self.api_key = api_key
-        self.base_url = base_url.rstrip("/")
-
-    def _request(self, path: str, data: dict, method: str = "POST"):
-        """Make an HTTP request to the EVEZ API."""
-        url = f"{self.base_url}{path}"
-        body = json.dumps(data).encode()
-        req = urllib.request.Request(
-            url, data=body, method=method,
-            headers={
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {self.api_key}",
-            },
-        )
-        try:
-            with urllib.request.urlopen(req, timeout=120) as resp:
-                return json.loads(resp.read())
-        except urllib.error.HTTPError as e:
-            error_body = e.read().decode()
-            try:
-                return json.loads(error_body)
-            except json.JSONDecodeError:
-                raise RuntimeError(f"HTTP {e.code}: {error_body}")
-
-    def chat(self, message: str, model: str = "evez-smart") -> str:
+        self.base_url = base_url or BASE_URL
+    
+    def chat(self, message, model="deepseek-v3", max_tokens=500):
         """Send a chat message and return the response text."""
-        data = self._request("/chat/completions", {
+        body = json.dumps({
             "model": model,
             "messages": [{"role": "user", "content": message}],
-        })
-        if "choices" in data:
-            return data["choices"][0]["message"]["content"]
-        raise RuntimeError(f"API error: {data}")
-
-    def models(self) -> list:
-        """List available models."""
-        url = f"{self.base_url}/models"
-        req = urllib.request.Request(url, headers={"Authorization": f"Bearer {self.api_key}"})
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            data = json.loads(resp.read())
-        return data.get("data", [])
-
-    def key_info(self) -> dict:
+            "max_tokens": max_tokens
+        }).encode()
+        headers = {"Content-Type": "application/json"}
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
+        
+        # Try primary, then fallback
+        for url in [self.base_url, FALLBACK_URL]:
+            try:
+                req = urllib.request.Request(
+                    f"{url}/chat/completions",
+                    data=body, method="POST", headers=headers
+                )
+                with urllib.request.urlopen(req, timeout=60) as r:
+                    data = json.loads(r.read())
+                    content = data["choices"][0]["message"].get("content")
+                    if content:
+                        return content
+                    # Some models put content in reasoning field
+                    return data["choices"][0]["message"].get("reasoning", "No response")
+            except Exception:
+                continue
+        return "Error: all backends failed"
+    
+    def models(self):
+        """List available model IDs."""
+        try:
+            with urllib.request.urlopen(f"{self.base_url}/models", timeout=10) as r:
+                data = json.loads(r.read())
+                return [m["id"] for m in data.get("data", [])]
+        except:
+            return []
+    
+    def key_info(self):
         """Get info about your API key."""
-        return self._request("/key-info", {})
+        if not self.api_key:
+            return {"error": "No API key set"}
+        try:
+            req = urllib.request.Request(f"{self.base_url}/key-info",
+                headers={"Authorization": f"Bearer {self.api_key}"})
+            with urllib.request.urlopen(req, timeout=10) as r:
+                return json.loads(r.read())
+        except Exception as e:
+            return {"error": str(e)}
 
 
-def signup(email: str, name: str = "User") -> dict:
-    """Sign up for a free API key. No credit card required."""
-    url = f"{BASE_URL}/signup"
-    body = json.dumps({"email": email, "name": name}).encode()
-    req = urllib.request.Request(
-        url, data=body, method="POST",
-        headers={"Content-Type": "application/json"},
-    )
-    with urllib.request.urlopen(req, timeout=10) as resp:
-        return json.loads(resp.read())
+def signup(email):
+    """Create a free API key. Returns dict with 'key' field."""
+    body = json.dumps({"email": email}).encode()
+    for url in [BASE_URL, FALLBACK_URL]:
+        try:
+            req = urllib.request.Request(f"{url}/signup",
+                data=body, method="POST",
+                headers={"Content-Type": "application/json"})
+            with urllib.request.urlopen(req, timeout=10) as r:
+                return json.loads(r.read())
+        except:
+            continue
+    return {"error": "All backends failed"}
